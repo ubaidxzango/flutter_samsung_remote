@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
-import 'package:upnp/upnp.dart';
 import 'package:web_socket_channel/io.dart';
 
 import 'key_codes.dart';
@@ -30,15 +29,15 @@ final kUpnpTimeout = 1000;
 
 class SamsungSmartTV {
   final List<Map<String, dynamic>> services;
-  final String host;
-  final String mac;
-  final String api;
-  final String wsapi;
+  final String? host;
+  final String? mac;
+  final String? api;
+  final String? wsapi;
   bool isConnected = false;
-  String token;
+  String? token;
   dynamic info;
-  IOWebSocketChannel ws;
-  Timer timer;
+  late IOWebSocketChannel ws;
+  late Timer timer;
 
   SamsungSmartTV({
     this.host,
@@ -72,14 +71,17 @@ class SamsungSmartTV {
 
     // establish socket connection
     final appNameBase64 = base64.encode(utf8.encode(appName));
-    String channel = "${wsapi}channels/samsung.remote.control?name=$appNameBase64";
-    if (token != null) {
-      channel += '&token=$token';
-    }
+    String channel =
+        "${wsapi}channels/samsung.remote.control?name=$appNameBase64";
+    channel += '&token=$token';
 
     // log.info(`Connect to ${channel}`)
     // ws = IOWebSocketChannel.connect(channel);
-    ws = IOWebSocketChannel.connect(channel, badCertificateCallback: (X509Certificate cert, String host, int port) => true);
+    ws = IOWebSocketChannel.connect(
+      channel,
+      // badCertificateCallback: (X509Certificate cert, String host, int port) =>
+      //     true
+    );
 
     ws.stream.listen((message) {
       // timer?.cancel();
@@ -119,7 +121,7 @@ class SamsungSmartTV {
 
   Future<http.Response> getDeviceInfo() async {
     print("Get device info from $api");
-    return http.get(this.api);
+    return http.get(Uri.parse(this.api ?? ''));
   }
 
   // disconnect from device
@@ -155,47 +157,120 @@ class SamsungSmartTV {
     return Future.delayed(Duration(milliseconds: kKeyDelay));
   }
 
-  //static method to discover Samsung Smart TVs in the network using the UPNP protocol
+  // Discover Samsung TVs using SSDP (null-safe, no upnp dependency)
+//   static Future<SamsungSmartTV> discover(
+//       {Duration timeout = const Duration(seconds: 5)}) async {
+//     final completer = Completer<SamsungSmartTV>();
+//     final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+//     socket.broadcastEnabled = true;
 
-  static discover() async {
-    var completer = new Completer();
+//     const ssdpAddress = '239.255.255.250';
+//     const ssdpPort = 1900;
 
-    final client = DeviceDiscoverer();
-    final List<SamsungSmartTV> tvs = [];
+//     final searchRequest = '''
+// M-SEARCH * HTTP/1.1
+// HOST: $ssdpAddress:$ssdpPort
+// MAN: "ssdp:discover"
+// MX: 2
+// ST: ssdp:all
 
-    await client.start(ipv6: false);
+// ''';
 
-    client.quickDiscoverClients().listen((client) async {
-      RegExp re = RegExp(r'^.*?Samsung.+UPnP.+SDK\/1\.0$');
+//     socket.send(
+//       utf8.encode(searchRequest),
+//       InternetAddress(ssdpAddress),
+//       ssdpPort,
+//     );
 
-      //ignore other devices
-      if (!re.hasMatch(client.server)) {
-        return;
-      }
-      try {
-        final device = await client.getDevice();
+//     final timer = Timer(timeout, () {
+//       if (!completer.isCompleted) {
+//         completer.completeError(
+//           'No Samsung TVs found. Make sure the TV and phone are on the same network.',
+//         );
+//       }
+//       socket.close();
+//     });
 
-        Uri locaion = Uri.parse(client.location);
+//     socket.listen((event) {
+//       if (event == RawSocketEvent.read) {
+//         final datagram = socket.receive();
+//         if (datagram == null) return;
 
-        final deviceExists = tvs.firstWhere((tv) => tv.host == locaion.host, orElse: () => null);
+//         final response = utf8.decode(datagram.data, allowMalformed: true);
 
-        if (deviceExists == null) {
-          print("Found ${device.friendlyName} on IP ${locaion.host}");
-          final tv = SamsungSmartTV(host: locaion.host);
-          tv.addService({"location": client.location, "server": client.server, "st": client.st, "usn": client.usn});
-          tvs.add(tv);
-        }
-      } catch (e, stack) {
-        print("ERROR: $e - ${client.location}");
-        print(stack);
-      }
-    }).onDone(() {
-      if (tvs.isEmpty) {
-        completer.completeError("No Samsung TVs found. Make sure the UPNP protocol is enabled in your network.");
-      }
-      completer.complete(tvs.first);
+//         // Basic Samsung TV identification
+//         if (response.toLowerCase().contains('samsung')) {
+//           final locationLine = response.split('\n').firstWhere(
+//                 (l) => l.toLowerCase().startsWith('location:'),
+//                 orElse: () => '',
+//               );
+
+//           if (locationLine.isNotEmpty) {
+//             final uri = Uri.tryParse(locationLine.split(':')[1].trim());
+//             if (uri?.host != null && !completer.isCompleted) {
+//               timer.cancel();
+//               socket.close();
+//               completer.complete(SamsungSmartTV(host: uri!.host));
+//             }
+//           }
+//         }
+//       }
+//     });
+
+//     return completer.future;
+//   }
+
+// Discover TVs using SSDP (null-safe, no upnp dependency)
+  static Future<void> discover(
+      {Duration timeout = const Duration(seconds: 5)}) async {
+    print('[SSDP] Starting network discovery for TVs...');
+    final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+    socket.broadcastEnabled = true;
+
+    const ssdpAddress = '239.255.255.250';
+    const ssdpPort = 1900;
+
+    final searchRequest = '''
+M-SEARCH * HTTP/1.1
+HOST: $ssdpAddress:$ssdpPort
+MAN: "ssdp:discover"
+MX: 2
+ST: ssdp:all
+
+''';
+
+    print('[SSDP] Sending M-SEARCH broadcast');
+    socket.send(
+      utf8.encode(searchRequest),
+      InternetAddress(ssdpAddress),
+      ssdpPort,
+    );
+
+    final timer = Timer(timeout, () {
+      print('[SSDP] Discovery completed or timed out');
+      socket.close();
     });
 
-    return completer.future;
+    socket.listen((event) {
+      if (event == RawSocketEvent.read) {
+        final datagram = socket.receive();
+        if (datagram == null) return;
+
+        final response = utf8.decode(datagram.data, allowMalformed: true);
+
+        // Log all SSDP responses for debugging
+        print('[SSDP] Response received:\n$response');
+
+        // Basic filtering for TVs (Samsung, Android TV, Google TV, etc.)
+        final isTV = response.toLowerCase().contains('samsung') ||
+            response.toLowerCase().contains('android') ||
+            response.toLowerCase().contains('roku') ||
+            response.toLowerCase().contains('google');
+
+        if (isTV) {
+          print('[SSDP] TV detected on network');
+        }
+      }
+    });
   }
 }
